@@ -12,8 +12,8 @@ api_key = st.secrets["GENAI_API_KEY"]
 sheet_id = st.secrets["SHEET_ID"]
 
 # Construct the CSV export URL
-sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
-
+#sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+sheet_url = st.secrets["SHEET_URL"]
 # Configure Gemini
 genai.configure(api_key=api_key)
 model = genai.GenerativeModel('gemini-1.5-flash')

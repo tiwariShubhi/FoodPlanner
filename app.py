@@ -9,7 +9,7 @@ import json
 # Access secrets securely
 # We will set these up in the Streamlit dashboard later
 api_key = st.secrets["GENAI_API_KEY"]
-sheet_id = st.secrets["SHEET_ID"]
+#sheet_id = st.secrets["SHEET_ID"]
 
 # Construct the CSV export URL
 #sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"

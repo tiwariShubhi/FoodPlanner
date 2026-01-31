@@ -5,14 +5,15 @@ import random
 import json
 
 # --- CONFIGURATION ---
+# 1. Fetch secrets
 api_key = st.secrets["GENAI_API_KEY"]
 sheet_url = st.secrets["SHEET_URL"]
 
 genai.configure(api_key=api_key)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- 1. INTELLIGENCE ---
-@st.cache_data(ttl=600) # Reduced cache to 10 mins so you see updates faster
+# --- 1. THE BRAIN (Fetch & Analyze) ---
+@st.cache_data(ttl=600) # Cache for 10 mins
 def get_meal_data():
     try:
         df = pd.read_csv(sheet_url)
@@ -21,7 +22,9 @@ def get_meal_data():
         return None
 
     all_meals = []
-    # Flexible column matching (handles "Snacks", "Snack", "Evening Snack")
+    
+    # SMART COLUMN MAPPING
+    # This checks for "Snack", "Snacks", "Evening snacks" automatically
     col_map = {
         "Breakfast": ["Breakfast"], 
         "Lunch": ["Lunch"], 
@@ -50,7 +53,7 @@ def get_meal_data():
 
     For EACH meal, return a JSON object:
     1. "name": The exact name provided.
-    2. "ingredients": List of 3-4 main ingredients (lowercase). Exclude salt, oil, water.
+    2. "ingredients": List of 3-4 main ingredients (lowercase). Exclude salt, oil, water, spices.
     3. "protein": "High" (if >12g like Dal, Paneer, Eggs, Soya), "Medium" (5-12g), "Low" (<5g).
 
     Return ONLY a valid JSON list.
@@ -74,21 +77,25 @@ def get_meal_data():
         st.error(f"AI Error: {e}")
         return None
 
-# --- 2. LOGIC (The "Solver") ---
+# --- 2. THE SOLVER (With Indian Context) ---
 def generate_schedule(meal_db):
     week_plan = []
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     
-    # STAPLES: Ingredients allowed to repeat in the same day
-    ALLOWED_REPEATS = {"rice", "roti", "chapati", "curd", "yogurt", "bread", "ghee", "oil", "spices"}
+    # STAPLES: These are allowed to repeat every day
+    STAPLES = {"rice", "roti", "chapati", "curd", "yogurt", "bread", "ghee", "coffee", "tea"}
     
+    # To track variety across the week (prevent eating Chole twice in a row)
+    history_ingredients = set()
+
     for day in days:
         daily_menu = {}
-        daily_ingredients = set()
+        daily_ingredients = set() # Track what we eat TODAY
         daily_score = 0
         attempts = 0
         
-        while attempts < 100: # Try 100 combinations
+        # Try 50 combinations to build a balanced day
+        while attempts < 50:
             temp_menu = {}
             temp_ing = set()
             temp_score = 0
@@ -104,44 +111,54 @@ def generate_schedule(meal_db):
                 
                 selected = None
                 for opt in options:
-                    # Get ingredients for this option
+                    # Get ingredients
                     opt_ings = set(opt.get('ingredients', []))
                     
-                    # CHECK: specific repeating ingredients (excluding staples)
-                    # We subtract allowed staples from the check
-                    critical_ings = opt_ings - ALLOWED_REPEATS
+                    # FILTER: Ignore staples when checking for repetition
+                    # We care if 'Paneer' repeats, not if 'Roti' repeats.
+                    critical_ings = opt_ings - STAPLES
                     
-                    # If any critical ingredient is already used today, skip
-                    if not critical_ings.isdisjoint(daily_ingredients):
+                    # Rule 1: Variety WITHIN the day (e.g., Don't have Paneer for Lunch AND Dinner)
+                    if not critical_ings.isdisjoint(temp_ing):
                         continue
+                        
+                    # Rule 2: Variety ACROSS the week (e.g., Don't have Rajma on Mon AND Tue)
+                    # We allow a little overlap (len check) but mostly try to avoid it
+                    if not critical_ings.isdisjoint(history_ingredients):
+                         # If it's a "High" protein item, we are stricter about repetition
+                         if opt['protein'] == 'High':
+                             continue
                         
                     selected = opt
                     break
                 
+                # If strict rules failed, just pick ANY random meal 
+                # (Better to have a repeated meal than no meal at all)
+                if not selected and options:
+                    selected = random.choice(options)
+
                 if selected:
                     temp_menu[cat] = selected
-                    # Track critical ingredients (ignore staples)
-                    daily_ingredients.update(set(selected['ingredients']) - ALLOWED_REPEATS)
+                    # Add non-staples to our tracking lists
+                    temp_ing.update(set(selected['ingredients']) - STAPLES)
                     temp_score += protein_map.get(selected['protein'], 1)
-                else:
-                    # If we can't find a non-repeating meal, just pick a random one
-                    # (Better to have a plan with repeats than no plan)
-                    if options:
-                        selected = random.choice(options)
-                        temp_menu[cat] = selected
-                        temp_score += protein_map.get(selected['protein'], 1)
             
-            # Acceptance Criteria
+            # Acceptance: Is protein decent? (Score > 5)
             if temp_score >= 5: 
                 daily_menu = temp_menu
+                daily_ingredients = temp_ing
                 daily_score = temp_score
                 break
             
             attempts += 1
         
-        # If still failed after 100 tries, use the last attempted menu
+        # Fallback: If logic failed 50 times, take the last attempt
         if not daily_menu:
              daily_menu = temp_menu
+             daily_score = temp_score
+
+        # Update History: We only "remember" today's main ingredients for tomorrow
+        history_ingredients = daily_ingredients
 
         week_plan.append({
             "Day": day,
@@ -149,21 +166,21 @@ def generate_schedule(meal_db):
             "Lunch": daily_menu.get('Lunch', {}).get('name', '-'),
             "Snack": daily_menu.get('Snack', {}).get('name', '-'),
             "Dinner": daily_menu.get('Dinner', {}).get('name', '-'),
-            "Protein Score": daily_score
+            "Protein Level": "🔥 High" if daily_score > 7 else "✅ Good"
         })
 
     return pd.DataFrame(week_plan)
 
 # --- 3. UI ---
-st.set_page_config(page_title="Meal Planner", page_icon="🥗")
+st.set_page_config(page_title="Indian Meal Planner", page_icon="🥗")
 st.title("🥗 Indian Diet Planner")
 
 if st.button("Generate New Week"):
-    st.cache_data.clear() # AUTO-CLEAR CACHE ON CLICK
-    with st.spinner("Analyzing Menu..."):
+    st.cache_data.clear() # Force reload from Google Sheets
+    with st.spinner("Analyzing your Menu..."):
         db = get_meal_data()
         if db:
             schedule = generate_schedule(db)
             st.table(schedule)
         else:
-            st.error("Data check failed.")
+            st.error("Something went wrong. Check your Sheet.")

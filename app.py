@@ -10,7 +10,7 @@ api_key = st.secrets["GENAI_API_KEY"]
 sheet_url = st.secrets["SHEET_URL"]
 
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 # --- 1. THE BRAIN (Fetch & Analyze) ---
 @st.cache_data(ttl=600) # Cache for 10 mins

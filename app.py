@@ -5,26 +5,23 @@ import random
 import json
 
 # --- CONFIGURATION ---
-# 1. Fetch secrets
 api_key = st.secrets["GENAI_API_KEY"]
 sheet_url = st.secrets["SHEET_URL"]
 
 genai.configure(api_key=api_key)
 model = genai.GenerativeModel('gemini-2.5-flash')
 
-# --- 1. THE BRAIN (Fetch & Analyze) ---
-@st.cache_data(ttl=600) # Cache for 10 mins
+# --- 1. INTELLIGENCE (Get Grams & Specific Ingredients) ---
+@st.cache_data(ttl=600) 
 def get_meal_data():
     try:
         df = pd.read_csv(sheet_url)
     except Exception as e:
-        st.error(f"Error reading Sheet. Check URL in secrets. Error: {e}")
+        st.error(f"Error reading Sheet: {e}")
         return None
 
     all_meals = []
-    
-    # SMART COLUMN MAPPING
-    # This checks for "Snack", "Snacks", "Evening snacks" automatically
+    # Smart column mapping
     col_map = {
         "Breakfast": ["Breakfast"], 
         "Lunch": ["Lunch"], 
@@ -35,7 +32,6 @@ def get_meal_data():
     found_cols = df.columns.tolist()
     
     for category, possible_names in col_map.items():
-        # Find which column name actually exists in the sheet
         actual_col = next((c for c in possible_names if c in found_cols), None)
         if actual_col:
             items = df[actual_col].dropna().tolist()
@@ -43,18 +39,20 @@ def get_meal_data():
                 all_meals.append({"category": category, "name": item})
 
     if not all_meals:
-        st.error("Could not find columns! Check headers.")
+        st.error("No meals found!")
         return None
 
-    # Ask Gemini to classify
+    # Prompt requesting Grams
     prompt = f"""
     You are a nutritionist. Analyze this list of Indian meals:
     {json.dumps([m['name'] for m in all_meals])}
 
     For EACH meal, return a JSON object:
     1. "name": The exact name provided.
-    2. "ingredients": List of 3-4 main ingredients (lowercase). Exclude salt, oil, water, spices.
-    3. "protein": "High" (if >12g like Dal, Paneer, Eggs, Soya), "Medium" (5-12g), "Low" (<5g).
+    2. "ingredients": List of 3 main ingredients (lowercase, specific). 
+       Example: Use "moong dal" instead of just "dal". Use "paneer", "rice", "wheat".
+    3. "protein_g": Estimated protein content in GRAMS (integer only). 
+       (e.g., A bowl of Dal = 7, 2 Eggs = 12, Paneer Curry = 15).
 
     Return ONLY a valid JSON list.
     """
@@ -77,110 +75,110 @@ def get_meal_data():
         st.error(f"AI Error: {e}")
         return None
 
-# --- 2. THE SOLVER (With Indian Context) ---
+# --- 2. LOGIC (Deck of Cards System) ---
 def generate_schedule(meal_db):
-    week_plan = []
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     
-    # STAPLES: These are allowed to repeat every day
-    STAPLES = {"rice", "roti", "chapati", "curd", "yogurt", "bread", "ghee", "coffee", "tea"}
+    # "Deck of Cards" approach: 
+    # We create a shuffled list for each category. We pop items off one by one.
+    # This guarantees NO repeats until all items have been used once.
+    decks = {}
+    for cat in ["Breakfast", "Lunch", "Snack", "Dinner"]:
+        items = meal_db.get(cat, [])
+        random.shuffle(items)
+        decks[cat] = items
+
+    week_plan = []
     
-    # To track variety across the week (prevent eating Chole twice in a row)
-    history_ingredients = set()
+    # Staples that are totally fine to repeat every day
+    STAPLES = {"rice", "roti", "chapati", "curd", "yogurt", "bread", "ghee", "tea", "coffee", "milk"}
 
     for day in days:
         daily_menu = {}
-        daily_ingredients = set() # Track what we eat TODAY
-        daily_score = 0
-        attempts = 0
-        
-        # Try 50 combinations to build a balanced day
-        while attempts < 50:
-            temp_menu = {}
-            temp_ing = set()
-            temp_score = 0
-            valid = True
-            
-            protein_map = {"High": 3, "Medium": 2, "Low": 1}
+        daily_grams = 0
+        daily_ingredients = set()
 
-            for cat in ["Breakfast", "Lunch", "Snack", "Dinner"]:
-                options = meal_db.get(cat, [])
-                if not options: continue
+        for cat in ["Breakfast", "Lunch", "Snack", "Dinner"]:
+            deck = decks.get(cat, [])
+            
+            # If we ran out of meals in the deck (e.g. 5 options for 7 days), 
+            # we refill it with the original list and reshuffle.
+            if not deck:
+                deck = meal_db.get(cat, [])[:] # copy original
+                random.shuffle(deck)
+                decks[cat] = deck
+            
+            # Try to pick a meal from the deck that doesn't clash with TODAY's lunch/dinner
+            # We peek at the top cards
+            selected = None
+            
+            for i, candidate in enumerate(deck):
+                # Check variety within the day
+                cand_ings = set(candidate.get('ingredients', []))
+                critical_ings = cand_ings - STAPLES
                 
-                random.shuffle(options)
-                
-                selected = None
-                for opt in options:
-                    # Get ingredients
-                    opt_ings = set(opt.get('ingredients', []))
-                    
-                    # FILTER: Ignore staples when checking for repetition
-                    # We care if 'Paneer' repeats, not if 'Roti' repeats.
-                    critical_ings = opt_ings - STAPLES
-                    
-                    # Rule 1: Variety WITHIN the day (e.g., Don't have Paneer for Lunch AND Dinner)
-                    if not critical_ings.isdisjoint(temp_ing):
-                        continue
-                        
-                    # Rule 2: Variety ACROSS the week (e.g., Don't have Rajma on Mon AND Tue)
-                    # We allow a little overlap (len check) but mostly try to avoid it
-                    if not critical_ings.isdisjoint(history_ingredients):
-                         # If it's a "High" protein item, we are stricter about repetition
-                         if opt['protein'] == 'High':
-                             continue
-                        
-                    selected = opt
+                if critical_ings.isdisjoint(daily_ingredients):
+                    selected = deck.pop(i) # Remove it from the deck so it won't repeat this week
                     break
-                
-                # If strict rules failed, just pick ANY random meal 
-                # (Better to have a repeated meal than no meal at all)
-                if not selected and options:
-                    selected = random.choice(options)
-
-                if selected:
-                    temp_menu[cat] = selected
-                    # Add non-staples to our tracking lists
-                    temp_ing.update(set(selected['ingredients']) - STAPLES)
-                    temp_score += protein_map.get(selected['protein'], 1)
             
-            # Acceptance: Is protein decent? (Score > 5)
-            if temp_score >= 5: 
-                daily_menu = temp_menu
-                daily_ingredients = temp_ing
-                daily_score = temp_score
-                break
-            
-            attempts += 1
-        
-        # Fallback: If logic failed 50 times, take the last attempt
-        if not daily_menu:
-             daily_menu = temp_menu
-             daily_score = temp_score
+            # If all cards clash (rare), just take the top card anyway
+            if not selected and deck:
+                selected = deck.pop(0)
 
-        # Update History: We only "remember" today's main ingredients for tomorrow
-        history_ingredients = daily_ingredients
+            if selected:
+                daily_menu[cat] = selected
+                daily_ingredients.update(set(selected.get('ingredients', [])) - STAPLES)
+                daily_grams += selected.get('protein_g', 0)
 
         week_plan.append({
             "Day": day,
-            "Breakfast": daily_menu.get('Breakfast', {}).get('name', '-'),
-            "Lunch": daily_menu.get('Lunch', {}).get('name', '-'),
-            "Snack": daily_menu.get('Snack', {}).get('name', '-'),
-            "Dinner": daily_menu.get('Dinner', {}).get('name', '-'),
-            "Protein Level": "🔥 High" if daily_score > 7 else "✅ Good"
+            "Breakfast": daily_menu.get('Breakfast', {}).get('name', ''),
+            "Lunch": daily_menu.get('Lunch', {}).get('name', ''),
+            "Snack": daily_menu.get('Snack', {}).get('name', ''),
+            "Dinner": daily_menu.get('Dinner', {}).get('name', ''),
+            "Protein (g)": daily_grams
         })
 
     return pd.DataFrame(week_plan)
 
-# --- 3. UI ---
-st.set_page_config(page_title="Indian Meal Planner", page_icon="🥗")
-st.title("🥗 Indian Diet Planner")
+# --- 3. UI (Editable) ---
+st.set_page_config(page_title="Meal Planner", page_icon="🥗", layout="wide")
+st.title("🥗 Interactive Weekly Planner")
+st.caption("Click any cell to edit. The 'Protein' total updates when you generate.")
 
-if st.button("Generate New Week"):
-    st.cache_data.clear() # Force reload from Google Sheets
-    with st.spinner("Analyzing your Menu..."):
+# Initialize session state to hold the data
+if 'meal_plan' not in st.session_state:
+    st.session_state.meal_plan = None
+
+if st.button("Generate New Menu"):
+    st.cache_data.clear()
+    with st.spinner("Calculating macros & Shuffling deck..."):
         db = get_meal_data()
         if db:
-            schedule = generate_schedule(db)
-            st.table(schedule)
-        else:
-            st.error("Something went wrong. Check your Sheet.")
+            st.session_state.meal_plan = generate_schedule(db)
+
+# Display Editable Table if data exists
+if st.session_state.meal_plan is not None:
+    # 1. Allow User to Edit
+    edited_df = st.data_editor(
+        st.session_state.meal_plan, 
+        num_rows="dynamic",
+        use_container_width=True,
+        height=300
+    )
+
+    # 2. Download Button
+    csv = edited_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download Plan as CSV",
+        data=csv,
+        file_name="my_weekly_meal_plan.csv",
+        mime="text/csv",
+    )
+    
+    # 3. Stats
+    avg_protein = edited_df["Protein (g)"].mean()
+    st.metric("Average Daily Protein", f"{avg_protein:.1f} g")
+
+else:
+    st.info("Click 'Generate New Menu' to start.")

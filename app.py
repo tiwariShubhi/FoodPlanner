@@ -11,7 +11,18 @@ sheet_url = st.secrets["SHEET_URL"]
 genai.configure(api_key=api_key)
 model = genai.GenerativeModel('gemini-2.5-flash')
 
-# --- 1. GET DATA & CALCULATE PROTEIN (GRAMS) ---
+# --- USER'S PROTEIN BOOSTERS ---
+# The app will pick one of these if a meal is low in protein (< 15g)
+BOOSTERS = [
+    {"name": "2 Scrambled Eggs", "protein": 12},
+    {"name": "2 Boiled Eggs", "protein": 12},
+    {"name": "50g Raw Paneer", "protein": 9},
+    {"name": "Paneer Bhurji (small bowl)", "protein": 12},
+    {"name": "Soya Bhurji", "protein": 15},
+    {"name": "Soya chunks chilly", "protein": 15}
+]
+
+# --- 1. FETCH & ANALYZE (Get Base Protein) ---
 @st.cache_data(ttl=600) 
 def get_meal_data():
     try:
@@ -21,7 +32,6 @@ def get_meal_data():
         return None
 
     all_meals = []
-    # Smart column mapping to catch "Snack" vs "Snacks"
     col_map = {
         "Breakfast": ["Breakfast"], 
         "Lunch": ["Lunch"], 
@@ -34,7 +44,6 @@ def get_meal_data():
     for category, possible_names in col_map.items():
         actual_col = next((c for c in possible_names if c in found_cols), None)
         if actual_col:
-            # Drop empty rows
             items = [x for x in df[actual_col].tolist() if str(x).strip() != ""]
             for item in items:
                 all_meals.append({"category": category, "name": item})
@@ -43,17 +52,16 @@ def get_meal_data():
         st.error("No meals found in the sheet!")
         return None
 
-    # Prompt Gemini for specific grams
+    # Ask Gemini for Base Protein
     prompt = f"""
     You are a nutritionist. Analyze this list of Indian meals:
     {json.dumps([m['name'] for m in all_meals])}
 
     For EACH meal, return a JSON object:
     1. "name": The exact name provided.
-    2. "ingredients": List of 3 main ingredients (lowercase). 
-       (e.g., "paneer", "rice", "wheat", "chickpeas").
+    2. "ingredients": List of 3 main ingredients (lowercase).
     3. "protein_g": ESTIMATED Protein in GRAMS (Integer only). 
-       (e.g., Dal=7, 2 Eggs=12, Paneer Curry=15, Snack=3).
+       (e.g., Poha=4, Dal=7, 2 Eggs=12, Paneer Curry=14).
 
     Return ONLY a valid JSON list.
     """
@@ -76,13 +84,10 @@ def get_meal_data():
         st.error(f"AI Error: {e}")
         return None
 
-# --- 2. GENERATE BALANCED SCHEDULE ---
+# --- 2. GENERATE WITH "AUTO-BOOST" ---
 def generate_schedule(meal_db):
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     
-    # "Deck of Cards" System: 
-    # Create a pile for each category. Shuffle it. Deal one card per day.
-    # This guarantees we don't repeat a main dish until we've eaten everything else.
     decks = {}
     for cat in ["Breakfast", "Lunch", "Snack", "Dinner"]:
         items = meal_db.get(cat, [])
@@ -90,77 +95,77 @@ def generate_schedule(meal_db):
         decks[cat] = items
 
     week_plan = []
-    
-    # Allowed Repeats (Staples)
-    STAPLES = {"rice", "roti", "chapati", "curd", "yogurt", "bread", "ghee", "tea", "coffee", "milk"}
+    STAPLES = {"rice", "roti", "chapati", "curd", "yogurt", "bread", "ghee", "tea", "coffee"}
 
     for day in days:
         daily_menu = {}
-        daily_grams = 0
+        daily_total_protein = 0
         daily_ingredients = set()
 
         for cat in ["Breakfast", "Lunch", "Snack", "Dinner"]:
             deck = decks.get(cat, [])
-            
-            # If deck is empty (e.g. you have 5 meals but need 7 days), refill & reshuffle
             if not deck:
                 deck = meal_db.get(cat, [])[:]
                 random.shuffle(deck)
                 decks[cat] = deck
             
+            # 1. Pick a Meal
             selected = None
-            
-            # Try to pick a card that doesn't clash with TODAY's other meals
             for i, candidate in enumerate(deck):
                 cand_ings = set(candidate.get('ingredients', []))
                 critical_ings = cand_ings - STAPLES
-                
                 if critical_ings.isdisjoint(daily_ingredients):
-                    selected = deck.pop(i) # Use it and remove from deck
+                    selected = deck.pop(i)
                     break
             
-            # If everything conflicts (rare), just take the top one
             if not selected and deck:
                 selected = deck.pop(0)
 
-            if selected:
-                daily_menu[cat] = selected
-                daily_ingredients.update(set(selected.get('ingredients', [])) - STAPLES)
-                daily_grams += selected.get('protein_g', 0)
+            # 2. THE BOOSTER LOGIC
+            final_name = selected['name']
+            protein_count = selected.get('protein_g', 0)
+            
+            # If protein is low (< 15g) and it's NOT a light snack (check logic)
+            # We usually want to boost Breakfast, Lunch, Dinner. Snacks can stay light.
+            if cat != "Snack" and protein_count < 15:
+                # Pick a random booster
+                booster = random.choice(BOOSTERS)
+                
+                # Update the name and protein
+                final_name = f"{final_name} + {booster['name']}"
+                protein_count += booster['protein']
+            
+            # Save to menu
+            daily_menu[cat] = final_name
+            daily_ingredients.update(set(selected.get('ingredients', [])) - STAPLES)
+            daily_total_protein += protein_count
 
         week_plan.append({
             "Day": day,
-            "Breakfast": daily_menu.get('Breakfast', {}).get('name', ''),
-            "Lunch": daily_menu.get('Lunch', {}).get('name', ''),
-            "Snack": daily_menu.get('Snack', {}).get('name', ''),
-            "Dinner": daily_menu.get('Dinner', {}).get('name', ''),
-            "Total Protein (g)": daily_grams
+            "Breakfast": daily_menu.get('Breakfast', '-'),
+            "Lunch": daily_menu.get('Lunch', '-'),
+            "Snack": daily_menu.get('Snack', '-'),
+            "Dinner": daily_menu.get('Dinner', '-'),
+            "Protein Goal": f"{daily_total_protein}g {'✅' if daily_total_protein >= 60 else '⚠️'}"
         })
 
     return pd.DataFrame(week_plan)
 
 # --- 3. UI ---
-st.set_page_config(page_title="Meal Planner", page_icon="🥗", layout="centered")
-st.title("🥗 Weekly Meal Planner")
+st.set_page_config(page_title="High Protein Planner", page_icon="💪", layout="wide")
+st.title("💪 High Protein Meal Planner")
+st.caption("Automatically adds Eggs/Paneer/Soya if a meal is low in protein.")
 
-if st.button("Generate New Menu"):
-    st.cache_data.clear() # Clear cache to fetch fresh data
-    with st.spinner("Calculating macros & Shuffling menu..."):
+if st.button("Generate Power Plan"):
+    st.cache_data.clear()
+    with st.spinner("Analyzing macros & Adding boosters..."):
         db = get_meal_data()
         if db:
             df = generate_schedule(db)
-            st.success("Menu Generated!")
             
-            # Show the table
-            st.table(df)
+            # Styling the table to highlight the Goal
+            st.dataframe(df, use_container_width=True)
             
-            # Create a CSV for download
+            # Download
             csv = df.to_csv(index=False).encode('utf-8')
-            
-            st.download_button(
-                label="📥 Download Plan (CSV)",
-                data=csv,
-                file_name="my_weekly_meal_plan.csv",
-                mime="text/csv",
-                key='download-csv'
-            )
+            st.download_button("📥 Download Plan", csv, "protein_plan.csv", "text/csv")

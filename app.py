@@ -115,4 +115,18 @@ if db is not None:
         
         # CSV
         csv = current_plan.to_csv(index=False).encode('utf-8')
-        col1.download_button("Download CSV", data=csv, file_name="meal_
+        col1.download_button("Download CSV", data=csv, file_name="meal_plan.csv", mime="text/csv")
+        
+        # Excel
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            current_plan.to_excel(writer, index=False, sheet_name='WeeklyPlan')
+        
+        col2.download_button(
+            label="Download Excel",
+            data=buffer.getvalue(),
+            file_name="meal_plan.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+else:
+    st.warning("Could not connect to the Google Sheet. Please ensure the link sharing is set to 'Anyone with the link'.")

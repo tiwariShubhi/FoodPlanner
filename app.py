@@ -6,16 +6,7 @@ from io import BytesIO
 # --- CONFIG ---
 st.set_page_config(page_title="Aahaar Meal Planner", layout="wide")
 
-# --- STYLING ---
-st.markdown("""
-    <style>
-    .stHeader { background-color: #f0f2f6; padding: 20px; border-radius: 10px; }
-    .meal-card { padding: 15px; border-left: 5px solid #ff4b4b; background: white; margin-bottom: 10px; }
-    </style>
-    """, unsafe_allow_html=True)
-
 # --- DATA LOADING ---
-# Ensure your sheet is shared as "Anyone with the link can view"
 SHEET_ID = "1tH9_wN6g1Di5N_XQ1CUDMuIlmr5wU7NfjdiyjBxoQn8"
 SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
 
@@ -23,110 +14,103 @@ SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=cs
 def load_meal_db():
     try:
         df = pd.read_csv(SHEET_URL)
-        # Clean column names
-        df.columns = [c.strip() for c in df.columns]
+        # Clean column names: remove spaces and make lowercase for matching
+        df.columns = [str(c).strip() for c in df.columns]
         return df
     except Exception as e:
         st.error(f"Error fetching sheet: {e}")
         return None
 
+def find_protein(meal_name, protein_val):
+    """Determines protein source from column or text analysis"""
+    text_to_search = f"{str(meal_name)} {str(protein_val)}".lower()
+    if 'egg' in text_to_search: return 'egg'
+    if 'paneer' in text_to_search: return 'paneer'
+    if 'soya' in text_to_search: return 'soya'
+    if 'dal' in text_to_search: return 'dal'
+    return 'other'
+
 def get_weekly_plan(df):
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     slots = ["Breakfast", "Lunch", "Snack", "Dinner"]
     
-    # Identify Protein columns automatically (e.g., "Breakfast Protein" or "Lunch Protein")
-    def get_col(slot, type="Meal"):
-        if type == "Meal":
-            return slot # Assumes column is exactly "Breakfast"
-        return f"{slot} Protein" # Assumes column is "Breakfast Protein"
+    # Robust Column Mapping
+    col_map = {}
+    for slot in slots:
+        # Find meal column (e.g., column that is exactly "Lunch")
+        meal_col = next((c for c in df.columns if c.lower() == slot.lower()), None)
+        # Find protein column (e.g., column containing "Lunch" and "Protein")
+        prot_col = next((c for c in df.columns if slot.lower() in c.lower() and 'prot' in c.lower()), None)
+        col_map[slot] = {'meal': meal_col, 'prot': prot_col}
+
+    # Show mapping in sidebar for debugging
+    with st.sidebar:
+        st.write("### Column Mapping Details")
+        st.json(col_map)
 
     plan_data = []
-
     for day in days:
         daily_plan = {"Day": day}
         used_proteins_today = set()
         
         for slot in slots:
-            meal_col = get_col(slot, "Meal")
-            prot_col = get_col(slot, "Protein")
+            m_col = col_map[slot]['meal']
+            p_col = col_map[slot]['prot']
             
-            if meal_col not in df.columns or prot_col not in df.columns:
-                daily_plan[slot] = "Check Sheet Columns"
+            if not m_col:
+                daily_plan[slot] = "Col Not Found"
                 continue
 
-            # Get valid options (not empty)
-            options = df[[meal_col, prot_col]].dropna()
+            # Get valid rows for this slot
+            valid_options = df[df[m_col].notna()]
             
-            # Filter options to avoid repeated proteins (Egg, Paneer, Soya)
-            # We only filter if the protein is one of your "Major" ones
-            major_proteins = ['egg', 'paneer', 'soya', 'dal + paneer', 'dal']
+            # Filter for diversity
+            options_list = valid_options.to_dict('records')
+            random.shuffle(options_list)
             
-            diverse_options = options[
-                ~options[prot_col].str.lower().isin(used_proteins_today) | 
-                ~options[prot_col].str.lower().isin(major_proteins)
-            ]
-
-            if not diverse_options.empty:
-                selection = diverse_options.sample(n=1).iloc[0]
-            else:
-                # Fallback if we run out of unique options
-                selection = options.sample(n=1).iloc[0]
-
-            daily_plan[slot] = selection[meal_col]
+            selected_meal = "Standard Meal"
+            selected_prot = "other"
             
-            # Track protein source to prevent same-day repeats
-            prot_val = str(selection[prot_col]).lower()
-            if any(p in prot_val for p in major_proteins):
-                used_proteins_today.add(prot_val)
+            for opt in options_list:
+                meal_name = opt[m_col]
+                prot_source = find_protein(meal_name, opt.get(p_col, ""))
+                
+                # If protein is not already used today, or it's 'other', pick it
+                if prot_source == 'other' or prot_source not in used_proteins_today:
+                    selected_meal = meal_name
+                    selected_prot = prot_source
+                    break
+            
+            daily_plan[slot] = selected_meal
+            if selected_prot != 'other':
+                used_proteins_today.add(selected_prot)
         
         plan_data.append(daily_plan)
     
     return pd.DataFrame(plan_data)
 
 # --- UI ---
-st.title("🍲 Aahaar: Power Meal Planner")
-st.write("Generating high-protein weekly schedules with zero protein repetition per day.")
+st.title("🍲 Aahaar: Weekly Power Planner")
 
 db = load_meal_db()
 
 if db is not None:
-    # Sidebar Info
-    with st.sidebar:
-        st.header("Database Info")
-        st.success("Sheet Connected!")
-        st.write("Detected Columns:", list(db.columns))
-        st.info("Ensure you have columns for: Breakfast, Breakfast Protein, Lunch, Lunch Protein, etc.")
-
-    # Main Action
     if st.button("Generate Full Week Plan", type="primary"):
-        with st.spinner("Optimizing variety..."):
-            weekly_df = get_weekly_plan(db)
-            st.session_state['active_plan'] = weekly_df
+        weekly_df = get_weekly_plan(db)
+        st.session_state['active_plan'] = weekly_df
 
-    # Display and Download
     if 'active_plan' in st.session_state:
-        current_plan = st.session_state['active_plan']
-        
-        st.subheader("Your 7-Day Plan")
-        st.dataframe(current_plan, use_container_width=True, hide_index=True)
+        plan = st.session_state['active_plan']
+        st.subheader("Your 7-Day Schedule")
+        st.dataframe(plan, use_container_width=True, hide_index=True)
 
-        # Download Buttons
-        col1, col2 = st.columns(2)
+        # Downloads
+        csv = plan.to_csv(index=False).encode('utf-8')
+        st.download_button("Download CSV", data=csv, file_name="meal_plan.csv")
         
-        # CSV
-        csv = current_plan.to_csv(index=False).encode('utf-8')
-        col1.download_button("Download CSV", data=csv, file_name="meal_plan.csv", mime="text/csv")
-        
-        # Excel
-        buffer = BytesIO()
-        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            current_plan.to_excel(writer, index=False, sheet_name='WeeklyPlan')
-        
-        col2.download_button(
-            label="Download Excel",
-            data=buffer.getvalue(),
-            file_name="meal_plan.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            plan.to_excel(writer, index=False)
+        st.download_button("Download Excel", data=output.getvalue(), file_name="meal_plan.xlsx")
 else:
-    st.warning("Could not connect to the Google Sheet. Please ensure the link sharing is set to 'Anyone with the link'.")
+    st.error("Cannot read spreadsheet. Check sharing permissions!")
